@@ -1,0 +1,167 @@
+const express = require('express');
+const sqlite3 = require('sqlite3').verbose();
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const path = require('path');
+
+const app = express();
+const PORT = 3001; // 后端运行在 3001 端口
+
+// 中间件
+app.use(cors()); // 允许跨域请求 (前端 5173 -> 后端 3001)
+app.use(bodyParser.json());
+
+// 1. 连接/创建数据库
+const dbPath = path.resolve(__dirname, 'database.sqlite');
+const db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+        console.error('无法连接数据库:', err.message);
+    } else {
+        console.log('✅ 已连接到 SQLite 数据库');
+        db.run('PRAGMA foreign_keys = ON');
+        initDb();
+    }
+});
+
+// 2. 初始化表结构
+function initDb() {
+    db.serialize(() => {
+        // 项目主表
+        db.run(`CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            entity TEXT,
+            invoiceInfo TEXT,
+            signDate TEXT,
+            paymentDate TEXT,
+            manager TEXT,
+            contact TEXT,
+            amount REAL,
+            status TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        // 回款明细表 (关联项目ID)
+        db.run(`CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER,
+            date TEXT,
+            amount REAL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )`);
+        
+        console.log("✅ 数据表初始化完成");
+    });
+}
+
+// --- API 接口定义 ---
+
+// 获取项目列表 (包含回款统计和明细)
+app.get('/api/projects', (req, res) => {
+    const sql = `SELECT * FROM projects ORDER BY id DESC`;
+    
+    db.all(sql, [], async (err, projects) => {
+        if (err) return res.status(400).json({ error: err.message });
+        
+        // 为每个项目获取回款记录 (简单实现：遍历查询)
+        // 生产环境可优化为 JOIN 查询
+        const results = await Promise.all(projects.map(async (project) => {
+            return new Promise((resolve, reject) => {
+                db.all('SELECT * FROM payments WHERE project_id = ?', [project.id], (err, payments) => {
+                    if (err) {
+                        project.payments = [];
+                        project.collected = 0;
+                    } else {
+                        project.payments = payments || [];
+                        project.collected = payments.reduce((sum, p) => sum + p.amount, 0);
+                    }
+                    resolve(project);
+                });
+            });
+        }));
+
+        res.json(results);
+    });
+});
+
+// 获取单个项目
+app.get('/api/projects/:id', (req, res) => {
+    const id = req.params.id;
+    db.get(`SELECT * FROM projects WHERE id = ?`, [id], (err, row) => {
+        if (err || !row) return res.status(404).json({ error: "Project not found" });
+        
+        db.all(`SELECT * FROM payments WHERE project_id = ?`, [id], (err, pays) => {
+            if (err) {
+                row.payments = [];
+                row.collected = 0;
+            } else {
+                const list = pays || [];
+                row.payments = list;
+                row.collected = list.reduce((acc, cur) => acc + (typeof cur.amount === 'number' ? cur.amount : parseFloat(cur.amount) || 0), 0);
+            }
+            res.json(row);
+        });
+    });
+});
+
+// 新增项目
+app.post('/api/projects', (req, res) => {
+    const { name, entity, invoiceInfo, signDate, paymentDate, manager, contact, amount, status } = req.body;
+    const sql = `INSERT INTO projects (name, entity, invoiceInfo, signDate, paymentDate, manager, contact, amount, status) VALUES (?,?,?,?,?,?,?,?,?)`;
+    const params = [name, entity, invoiceInfo, signDate, paymentDate, manager, contact, amount, status || '进行中'];
+    
+    db.run(sql, params, function(err) {
+        if (err) return res.status(400).json({ error: err.message });
+        // 返回新创建的项目对象
+        res.json({ 
+            id: this.lastID, 
+            ...req.body, 
+            collected: 0, 
+            payments: [] 
+        });
+    });
+});
+
+// 删除项目
+app.delete('/api/projects/:id', (req, res) => {
+    const id = req.params.id;
+    // 手动级联删除回款记录
+    db.run(`DELETE FROM payments WHERE project_id = ?`, [id], (err) => {
+        if (err) return res.status(400).json({ error: err.message });
+        db.run(`DELETE FROM projects WHERE id = ?`, [id], function(err) {
+            if (err) return res.status(400).json({ error: err.message });
+            res.json({ message: "Deleted", changes: this.changes });
+        });
+    });
+});
+
+// 添加回款
+app.post('/api/projects/:id/payments', (req, res) => {
+    const projectId = req.params.id;
+    const { date, amount } = req.body;
+    const sql = `INSERT INTO payments (project_id, date, amount) VALUES (?,?,?)`;
+    
+    db.run(sql, [projectId, date, amount], function(err) {
+        if (err) return res.status(400).json({ error: err.message });
+        res.json({ id: this.lastID, project_id: projectId, date, amount });
+    });
+});
+
+// 删除回款
+app.delete('/api/payments/:id', (req, res) => {
+    const id = req.params.id;
+    db.run(`DELETE FROM payments WHERE id = ?`, [id], function(err) {
+        if (err) return res.status(400).json({ error: err.message });
+        res.json({ message: "Payment deleted" });
+    });
+});
+
+// 启动服务
+app.listen(PORT, () => {
+    console.log(`
+    🚀 后端服务已启动!
+    📡 API 地址: http://localhost:${PORT}/api
+    💾 数据库文件: ${dbPath}
+    `);
+});
