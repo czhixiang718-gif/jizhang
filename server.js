@@ -218,6 +218,20 @@ app.post('/api/ai/generate', async (req, res) => {
   }
 });
 
+// --- 部署集成: 托管前端静态文件 ---
+// 生产环境或本地完整运行时，后端同时托管前端构建产物
+const clientDistPath = path.resolve(__dirname, 'client/dist');
+app.use(express.static(clientDistPath));
+
+// 所有未匹配的 API 请求都返回 React 前端应用 (支持 SPA 路由)
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api')) {
+    // 如果是 /api 开头但没匹配到上面的路由，返回 404
+    return res.status(404).json({ error: 'API endpoint not found' });
+  }
+  res.sendFile(path.join(clientDistPath, 'index.html'));
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 后端服务已启动: http://localhost:${PORT}/api`);
   console.log(`💾 数据库文件: ${DB_PATH}`);
